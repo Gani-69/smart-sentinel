@@ -11,6 +11,9 @@ SERVICES = {
         {"name": "Siva Puncture Shop", "coords": (17.4480, 78.3750), "phone": "9876543210"},
         {"name": "National Car Garage", "coords": (17.4400, 78.3800), "phone": "9123456789"}
     ]
+    "medical": [
+        {"name": "Post Office", "coords": (30.77,76.6), "phone": "9876543245"},
+    ]
 }
 
 def build_dashboard():

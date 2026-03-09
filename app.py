@@ -1,123 +1,137 @@
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
-from twilio.rest import Client # Ikkada kotha client add chesa
 from geopy.distance import geodesic
 from pymongo import MongoClient
 import urllib.parse
 import certifi
 import random
+from textblob import TextBlob
 
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
-# Twilio Console nunchi nee SID and Token ikkada pettu mawa (Demo kosam logic rasthunna)
-ACCOUNT_SID = 'AC...' 
-AUTH_TOKEN = 'your_token'
-TWILIO_NUMBER = 'whatsapp:+14155238886' 
-EMERGENCY_CONTACT = "whatsapp:+919110760928" 
+# --- 1. CONFIGURATION & DATABASE ---
+EMERGENCY_CONTACT = "whatsapp:+919110760928"
 
-# 1. MONGODB CONNECTION SETUP
 password = urllib.parse.quote_plus("Ganesh@69") 
 uri = f"mongodb+srv://Ganesh69:{password}@cluster0.vgrea6x.mongodb.net/?appName=Cluster0"
 
-client = MongoClient(uri, tlsCAFile=certifi.where())
-db = client['smart_sentinel_db']
-black_spots_col = db['black_spots']
-services_col = db['services']
+try:
+    # SSL/Handshake issues bypass with tlsAllowInvalidCertificates
+    client = MongoClient(uri, tls=True, tlsAllowInvalidCertificates=True, serverSelectionTimeoutMS=5000)
+    db = client['smart_sentinel_db']
+    black_spots_col = db['black_spots']
+    services_col = db['services'] 
+    user_logs_col = db['user_logs'] 
+    client.admin.command('ping')
+    print("✅ Connected to MongoDB Atlas Successfully!")
+except Exception as e:
+    print(f"❌ MongoDB Connection Error: {e}")
 
-# --- HELPER FUNCTIONS ---
+# --- 2. HELPER FUNCTIONS ---
 
 def get_dynamic_report(user_pos):
-    all_spots = black_spots_col.find()
-    alerts = []
-    for spot in all_spots:
-        dist = geodesic(user_pos, tuple(spot['coords'])).km
-        if dist < 0.5:
-            alerts.append(f"🔴 *IMMEDIATE ALERT:* {spot['name']} is just {int(dist*1000)}m away! \n👉 *Reason:* {spot['reason']}")
-        elif dist < 10.0:
-            alerts.append(f"⚠️ *UPCOMING:* {spot['name']} in {dist:.1f} km. \n👉 *Note:* {spot['reason']}")
-    return "\n\n".join(alerts) if alerts else "✅ *Route Clear:* No danger zones detected for the next 10km."
+    """Danger zones and black spots scan logic"""
+    try:
+        all_spots = list(black_spots_col.find())
+        alerts = []
+        for spot in all_spots:
+            dist = geodesic(user_pos, tuple(spot['coords'])).km
+            if dist < 0.5:
+                alerts.append(f"🔴 *IMMEDIATE ALERT:* {spot['name']} is {int(dist*1000)}m away! \n👉 {spot['reason']}")
+            elif dist < 10.0:
+                alerts.append(f"⚠️ *UPCOMING:* {spot['name']} in {dist:.1f} km. \n👉 {spot['reason']}")
+        return "\n\n".join(alerts) if alerts else "✅ *Route Clear:* No danger zones detected in 10km radius."
+    except Exception:
+        return "⚠️ Unable to fetch safety data at this moment mawa."
 
 def get_mock_health():
-    temp = random.randint(75, 95)
-    oil = random.randint(70, 90)
-    battery = round(random.uniform(12.1, 14.2), 1)
-    status = (
-        "📊 *Smart Sentinel: Vehicle Diagnostics*\n"
-        "--------------------------\n"
-        f"🌡️ Engine Temp: {temp}°C {'✅' if temp < 90 else '⚠️'}\n"
-        f"🛢️ Oil Level: {oil}% ✅\n"
-        f"🔋 Battery: {battery}V (Healthy) ✅\n"
-        "🏎️ Live Tracking: Enabled\n\n"
-        "All systems operational, mawa!"
-    )
-    return status
+    """Advanced Vehicle Health - Inspired by Taabi AI"""
+    temp, fuel = random.randint(80, 98), random.randint(15, 85)
+    battery = round(random.uniform(12.5, 14.2), 1)
+    tires = [random.randint(30, 35) for _ in range(4)]
+    return (f"📊 *Vehicle Health Update*\n"
+            f"--------------------------\n"
+            f"🌡️ Engine: {temp}°C | ⛽ Fuel: {fuel}%\n"
+            f"🔋 Battery: {battery}V\n"
+            f"🚗 Tires (PSI): {tires[0]}, {tires[1]}, {tires[2]}, {tires[3]}\n"
+            f"✅ Status: All systems are kummings, mawa!")
+
+# --- 3. MAIN BOT ROUTE ---
 
 @app.route("/bot", methods=['POST'])
 def bot():
     user_msg = request.values.get('Body', '').lower().strip()
     lat = request.values.get('Latitude')
     lon = request.values.get('Longitude')
+    sender = request.values.get('From')
 
     resp = MessagingResponse()
     msg = resp.message()
 
-    # --- 1. LOCATION LOGIC ---
+    greetings = [
+        "Hi mawa! Smart Sentinel is active. 🛡️",
+        "Hello baa! Safety scan cheddama? 🚀",
+        "Namaste mawa! Ready for the ride? 😎",
+        "Yo bro! Location share chey, nenu chusukunta! 🏎️"
+    ]
+
+    # --- A. LOCATION LOGIC ---
     if lat and lon:
         user_pos = (float(lat), float(lon))
         
-        # --- SOS TRIGGER LOGIC ---
-        if 'sos' in user_msg or 'emergency' in user_msg:
-            google_map = f"https://www.google.com/maps?q={lat},{lon}"
-            
-            # Repu demo lo neeku reply vacchela ee message rasanu
-            sos_confirmation = (
-                f"🆘 *SOS TRIGGERED!* 🆘\n\n"
-                f"Mawa, stay calm! I have initiated emergency protocols.\n"
-                f"📞 *Alerting:* {EMERGENCY_CONTACT}\n"
-                f"📍 *Location:* {google_map}\n\n"
-                f"Emergency teams have been notified with your coordinates! 🛡️"
+        # 1. UPSERT (Update existing or Insert new)
+        user_logs_col.update_one(
+            {"sender": sender},
+            {"$set": {"coords": [user_pos[0], user_pos[1]], "last_seen": "Real-time"}},
+            upsert=True
+        )
+
+        # 2. CROWDSOURCING (User adding a service)
+        if 'add' in user_msg:
+            s_name = user_msg.replace('add', '').strip().title()
+            if not s_name: s_name = "User Service"
+            services_col.update_one(
+                {"name": s_name, "coords": [user_pos[0], user_pos[1]]},
+                {"$set": {"type": "Crowdsourced", "verified": False}},
+                upsert=True
             )
-            
-            # Internal Debugging for Demo (Mee sir ki terminal lo chupinchu)
-            print(f"!!! CRITICAL ALERT: SOS sent to {EMERGENCY_CONTACT} !!!")
-            print(f"Location Coordinates: {lat}, {lon}")
-            
-            msg.body(sos_confirmation)
+            msg.body(f"✅ Adirindi mawa! '{s_name}' database lo add chesa. Future drivers ki idi help avthundi! 📍")
             return str(resp)
 
-        # Normal Safety Report
+        # 3. NEARBY SERVICES DISCOVERY
+        nearby = []
+        try:
+            for s in services_col.find():
+                s_coords = s.get('coords')
+                if s_coords:
+                    d = geodesic(user_pos, tuple(s_coords)).km
+                    if d < 2.5: 
+                        nearby.append(f"🏢 {s.get('name', 'Service')} ({d:.1f} km)")
+        except Exception:
+            pass
+        
+        service_text = "\n".join(nearby) if nearby else "No nearby services found mawa."
+
+        # 4. FINAL LOCATION RESPONSE
         safety_text = get_dynamic_report(user_pos)
-        services_text = "\n\n--------------------------\n🛠️ *Nearby Services (15km):*\n"
-        services_data = services_col.find_one()
-        found_service = False
+        msg.body(f"🛡️ *Safety Report:* \n{safety_text}\n\n📍 *Nearby Services:* \n{service_text}\n\n✅ Cloud Sync Successful!")
+
+    # --- B. CONVERSATIONAL LOGIC ---
+    elif user_msg:
+        sentiment = TextBlob(user_msg).sentiment.polarity
         
-        if services_data:
-            for cat in ['mechanic', 'medical']:
-                for shop in services_data.get(cat, []):
-                    d = geodesic(user_pos, tuple(shop['coords'])).km
-                    if d < 15:
-                        icon = "🔧" if cat == 'mechanic' else "🏥"
-                        services_text += f"{icon} {shop['name']} ({d:.1f}km) 📞 {shop['phone']}\n"
-                        found_service = True
-        
-        if not found_service:
-            services_text += "No shops found nearby."
-            
-        msg.body(f"🛡️ *Smart Sentinel Safety Report* 🛡️\n\n{safety_text}{services_text}")
-
-    # --- 2. COMMAND LOGIC ---
-    elif 'hi' in user_msg or 'hello' in user_msg:
-        msg.body("Hello! I am your *Smart Sentinel* 🛡️.\n\n📍 *Please Share your Location* to start the safety scan!")
-
-    elif 'status' in user_msg:
-        msg.body(get_mock_health())
-
-    elif 'sos' in user_msg or 'emergency' in user_msg:
-        msg.body("🚨 *Emergency Detected!* \n\nI need your live location to alert your emergency contact. Please *Share Location* now! 📍")
-
-    else:
-        msg.body("I didn't quite get that. Try saying 'Hi', 'Status', or share your location!")
+        if any(greet in user_msg for greet in ['hi', 'hello', 'namaste', 'hey']):
+            msg.body(random.choice(greetings))
+        elif 'status' in user_msg:
+            msg.body(get_mock_health())
+        elif 'sos' in user_msg or 'emergency' in user_msg:
+            msg.body("🚨 *EMERGENCY!* \n\nMawa, fast ga live location share chey! 📍")
+        elif sentiment > 0.5:
+            msg.body("Abba! Thanks mawa, nuvvu thope anthe! 🔥")
+        elif sentiment < -0.3:
+            msg.body("Em ayindi mawa? Chill, drive safe! 👊")
+        else:
+            msg.body("Artham ayindi mawa, kaani mundhu location pampu, route check cheddham! 🚀")
 
     return str(resp)
 
